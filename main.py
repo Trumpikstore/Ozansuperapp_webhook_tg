@@ -6,8 +6,8 @@ import requests
 app = Flask(__name__)
 
 # 🔐 Укажи здесь свои данные:
-TELEGRAM_TOKEN = "7625480081:AAHPxh4_RAqfoJL-jCxpLtJqklNynBZUsRQ"   # ← замени на свой токен
-TELEGRAM_CHAT_ID = 4937638793              # ← замени на свой chat_id (без кавычек)
+TELEGRAM_TOKEN = "7:7"   # ← замени на свой токен
+TELEGRAM_CHAT_ID =               # ← замени на свой chat_id (без кавычек)
 
 logging.basicConfig(
     filename="ozan_webhook.log",
