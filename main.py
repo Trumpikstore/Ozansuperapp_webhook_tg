@@ -1,73 +1,103 @@
-from fastapi import FastAPI, Request, HTTPException
+from flask import Flask, request, jsonify
 import logging
-import httpx
-import os
 import json
+import requests
 
-app = FastAPI()
+app = Flask(__name__)
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ozan-webhook")
+# 🔐 Укажи здесь свои данные:
+TELEGRAM_TOKEN = "7625480081:AAHPxh4_RAqfoJL-jCxpLtJqklNynBZUsRQ"   # ← замени на свой токен
+TELEGRAM_CHAT_ID = 4937638793              # ← замени на свой chat_id (без кавычек)
 
-# Переменные окружения
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+logging.basicConfig(
+    filename="ozan_webhook.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
-# Приветствие — чтобы не было 404 на "/"
-@app.get("/")
-async def root():
-    return {"status": "✅ Ozan webhook server is running"}
-
-# Функция отправки Telegram-сообщения
-async def send_telegram_message(message: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.error("❌ TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не установлены")
-        return
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(
-                TELEGRAM_API_URL,
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": message}
-            )
-        except Exception as e:
-            logger.error(f"Ошибка при отправке в Telegram: {e}")
-
-# Вебхук Ozan
-@app.post("/webhook/ozan")
-async def ozan_webhook(request: Request):
+def send_telegram_message(text: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logging.warning("TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не заданы")
+        return False
     try:
-        payload = await request.json()
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        response = requests.post(url, json=data)
+        response.raise_for_status()
+        return True
     except Exception as e:
-        logger.error("Ошибка при чтении JSON: %s", str(e))
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        logging.error(f"Ошибка при отправке в Telegram: {e}")
+        return False
 
-    logger.info("✅ Вебхук получен:\n" + json.dumps(payload, indent=2))
+@app.route("/webhook/ozan", methods=["POST"])
+def ozan_webhook():
+    try:
+        logging.info("=== Получен запрос ===")
+        logging.info(f"Headers: {dict(request.headers)}")
 
-    # Распарси нужные поля
-    transaction_type = payload.get("type", "").lower()
-    status = payload.get("status")
-    user_id = payload.get("user_id", "неизвестно")
-    amount = payload.get("amount", "—")
-    currency = payload.get("currency", "TRY")
-    transaction_id = payload.get("transaction_id", "N/A")
+        data = request.get_json(force=True, silent=True)
+        if data is None:
+            msg = "Тело запроса не содержит корректный JSON"
+            logging.error(msg)
+            return jsonify({"error": msg}), 400
 
-    # Составим сообщение
-    if transaction_type == "deposit" and status == "SUCCESS":
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception as e:
+                msg = f"Не удалось распарсить вложенный JSON: {e}"
+                logging.error(msg)
+                return jsonify({"error": msg}), 400
+
+        if not isinstance(data, dict):
+            msg = f"Ожидался JSON-объект (dict), но получен {type(data).__name__}"
+            logging.error(msg)
+            return jsonify({"error": msg}), 400
+
+        required_fields = [
+            "amount", "transactionType", "transactionStatus",
+            "firstName", "lastName", "accountInfo", "transactionId"
+        ]
+        missing_fields = [f for f in required_fields if f not in data]
+        if missing_fields:
+            msg = f"Отсутствуют обязательные поля: {', '.join(missing_fields)}"
+            logging.error(msg)
+            return jsonify({"error": msg}), 400
+
+        amount_info = data.get("amount", {})
+        if not isinstance(amount_info, dict):
+            msg = "'amount' должен быть объектом"
+            logging.error(msg)
+            return jsonify({"error": msg}), 400
+
+        value = amount_info.get("value")
+        currency = amount_info.get("currency")
+
         msg = (
-            f"💰 Пополнение от пользователя {user_id}\n"
-            f"Сумма: {amount} {currency}\n"
-            f"Транзакция: {transaction_id}"
+            f"💳 Ozan событие:\n"
+            f"Тип: {data.get('transactionType')}\n"
+            f"Статус: {data.get('transactionStatus')}\n"
+            f"Сумма: {value} {currency}\n"
+            f"Клиент: {data.get('firstName')} {data.get('lastName')}\n"
+            f"Счёт: {data.get('accountInfo')}\n"
+            f"ID: {data.get('transactionId')}"
         )
-    elif transaction_type == "transaction" and status == "SUCCESS":
-        msg = (
-            f"✅ Успешная транзакция от {user_id}\n"
-            f"Сумма: {amount} {currency}\n"
-            f"Транзакция: {transaction_id}"
-        )
-    else:
-        msg = f"⚠️ Получен webhook: неизвестный или неуспешный статус\n{json.dumps(payload, indent=2)}"
 
-    await send_telegram_message(msg)
-    return {"status": "received"}
+        if not send_telegram_message(msg):
+            logging.error("Не удалось отправить сообщение в Telegram")
+
+        return jsonify({"status": "ok"}), 200
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка обработки запроса: {e}", exc_info=True)
+        send_telegram_message(f"❌ Ошибка в webhook: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Ozan Webhook Listener активен", 200
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
